@@ -227,7 +227,7 @@ class Directorist_Shopping_Centres_Elementor_Widget extends Widget_Base {
                     ],
                 ],
                 'selectors'  => [
-                    '{{WRAPPER}} .dsc-centres__grid' => 'gap: {{SIZE}}{{UNIT}};',
+                    '{{WRAPPER}} .dsc-centres__track' => 'gap: {{SIZE}}{{UNIT}};',
                 ],
             ]
         );

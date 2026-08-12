@@ -1,5 +1,9 @@
 # Directorist Shopping Centres
 
+Version 1.1 adds the responsive Homepage centre carousel, the paginated Shopping Centres archive, structured centre addresses, accessible Directorist search suggestions, exact-name search routing, grouped store/deal pages, and the backend Store / Location workflow.
+
+See [docs/administrator-guide.md](docs/administrator-guide.md) for the day-to-day content workflow and media rules.
+
 Dynamic shopping centre tiles and shopping-centre deal pages for Directorist listings.
 
 This extension lets an admin create shopping centres, upload a centre image, assign Directorist deal listings to a centre, and display those centres on the homepage with an Elementor widget or shortcode.
