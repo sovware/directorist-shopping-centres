@@ -2,7 +2,11 @@
 
 Version 1.3 adds configurable archive display controls alongside the repeat-safe legacy Shopping Centre tag importer. Administrators can match the complete staging archive or show active-deal centres only without removing centre records or changing the separately controlled homepage widget.
 
-See [docs/administrator-guide.md](docs/administrator-guide.md) for the day-to-day content workflow and media rules.
+## Documentation
+
+- [User Guide](docs/user-docs.md) - English setup and content-management instructions.
+- [Administrator Guide](docs/administrator-guide.md) - day-to-day workflow and media rules.
+- [Packaged Word Guide](docs/Directorist-Shopping-Centres-User-Guide.docx) - illustrated English guide stored with the extension.
 
 Dynamic shopping centre tiles and shopping-centre deal pages for Directorist listings.
 
