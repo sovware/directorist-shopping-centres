@@ -135,7 +135,25 @@ From the Elementor **Style** tab, you can change:
 
 This means you can style the shopping centre section using normal Elementor controls.
 
-## Step 5: Use Shortcode Instead Of Elementor
+## Step 5: Configure The Complete Shopping Centres Archive
+
+Go to:
+
+```text
+Listings > Shopping Centre Tools > Archive display settings
+```
+
+These settings control `/shopping-centres/` independently from the homepage Elementor widget:
+
+- **Empty centres:** show or hide publicly visible centres that currently have no published deals.
+- **Centres per page:** show 6, 12, 24, or all centres.
+- **Archive search:** enable or disable search by centre name, suburb, state, or postcode.
+- **Sort order:** name A–Z, current deal count, or recently added.
+- **Deal count:** show or hide the current-deal count on archive cards.
+
+The default shows empty centres, 12 per page, matching the complete staging archive. An individual centre with **Show this Shopping Centre publicly** unchecked remains hidden regardless of these archive settings.
+
+## Step 6: Use Shortcode Instead Of Elementor
 
 If you are not using Elementor, add this shortcode to any WordPress page:
 
@@ -149,7 +167,7 @@ You can also use:
 [directorist_shopping_centres title="Shop deals by shopping centre" columns="3" hide_empty="1"]
 ```
 
-## Step 6: View A Shopping Centre Page
+## Step 7: View A Shopping Centre Page
 
 Each shopping centre gets its own page automatically.
 
@@ -269,7 +287,10 @@ Yes. Use the Elementor widget style controls to change the layout, colors, spaci
 
 ### What happens if a shopping centre has no deals?
 
-If **Hide empty centres** is enabled, that shopping centre will not show in the homepage section until it has at least one deal.
+The homepage and complete archive have separate controls:
+
+- If **Hide empty centres** is enabled in the Elementor widget, the centre will not show in the homepage section until it has at least one deal.
+- If **Show publicly visible centres with no current deals** is enabled in Shopping Centre Tools, the centre remains available in the complete archive and its page displays a no-current-deals message.
 
 ### Where do visitors redeem the offer?
 

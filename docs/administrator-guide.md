@@ -14,6 +14,9 @@
 - Add the centre name, description, dedicated landscape 16:9 image, address line, suburb, state, and postcode.
 - The public centre URL remains `/shopping-centre/{slug}/`.
 - The complete archive is `/shopping-centres/`.
+- Configure the archive under **Listings → Shopping Centre Tools → Archive display settings**. You can show/hide empty centres, choose 6/12/24/all items per page, enable search, select the sort order, and show/hide deal counts.
+- Empty centres are shown by default to match the complete staging archive. The homepage keeps its separate Elementor **Hide Empty Centres** and **Limit** controls.
+- The per-centre **Show this Shopping Centre publicly** checkbox always takes priority; hidden centres never appear publicly.
 - On a listing, use the **Store / Location** panel. Choose **Yes**, select the managed centre, enter the required Shop / Unit Number, and optionally enter a Level / Precinct.
 - Choose **No** for a standalone location and complete the normal Directorist address/location fields.
 - Existing assigned listings without a unit number appear under **Listings → Shopping Centre Tools** and must be completed on their next edit.

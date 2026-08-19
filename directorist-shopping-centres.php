@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Directorist Shopping Centres
  * Description: Shopping centre discovery, grouped deals, search, and an admin-friendly listing workflow for Directorist.
- * Version: 1.1.2
+ * Version: 1.3.0
  * Author: InStoreOnly
  * Text Domain: directorist-shopping-centres
  * Requires Plugins: directorist
@@ -11,13 +11,19 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Directorist_Shopping_Centres {
-    const VERSION           = '1.1.2';
-    const TAXONOMY          = 'at_biz_dir-shopping-centre';
-    const TERM_IMAGE_META   = '_dsc_image_id';
-    const TERM_ADDRESS_META = '_dsc_address_line';
-    const TERM_SUBURB_META  = '_dsc_suburb';
-    const TERM_STATE_META   = '_dsc_state';
-    const TERM_POSTCODE_META = '_dsc_postcode';
+    const VERSION                 = '1.3.0';
+    const REMEDIATION_VERSION     = '1.2.2';
+    const TAXONOMY                = 'at_biz_dir-shopping-centre';
+    const LEGACY_TAXONOMY         = 'at_biz_dir-tags';
+    const LEGACY_ROOT_SLUG        = 'shopping-centre-venue';
+    const TERM_IMAGE_META         = '_dsc_image_id';
+    const TERM_ADDRESS_META       = '_dsc_address_line';
+    const TERM_SUBURB_META        = '_dsc_suburb';
+    const TERM_STATE_META         = '_dsc_state';
+    const TERM_POSTCODE_META      = '_dsc_postcode';
+    const TERM_LEGACY_TAG_META    = '_dsc_legacy_tag_id';
+    const TERM_PUBLIC_META        = '_dsc_public_visibility';
+    const ARCHIVE_SETTINGS_OPTION = 'dsc_shopping_centres_archive_settings';
 
     const META_IN_CENTRE       = '_dsc_in_shopping_centre';
     const META_CENTRE_ID       = '_dsc_shopping_centre_id';
@@ -27,6 +33,7 @@ final class Directorist_Shopping_Centres {
 
     private static $instance = null;
     private $syncing_listing = false;
+    private $deal_count_cache = [];
 
     public static function instance() {
         if ( null === self::$instance ) {
@@ -38,6 +45,10 @@ final class Directorist_Shopping_Centres {
 
     public static function activate() {
         self::register_taxonomy_static();
+        // A fresh activation must not run the staging remediation routine on
+        // the next admin request. Legacy centre import remains an explicit,
+        // reviewable action in Shopping Centre Tools.
+        update_option( 'dsc_remediation_version', self::REMEDIATION_VERSION );
         flush_rewrite_rules();
     }
 
@@ -57,9 +68,9 @@ final class Directorist_Shopping_Centres {
         add_action( self::TAXONOMY . '_edit_form_fields', [ $this, 'edit_term_fields' ] );
         add_action( 'created_' . self::TAXONOMY, [ $this, 'save_term_fields' ] );
         add_action( 'edited_' . self::TAXONOMY, [ $this, 'save_term_fields' ] );
+        add_filter( 'manage_edit-' . self::TAXONOMY . '_columns', [ $this, 'add_visibility_column' ] );
+        add_filter( 'manage_' . self::TAXONOMY . '_custom_column', [ $this, 'render_visibility_column' ], 10, 3 );
 
-        add_action( 'add_meta_boxes_at_biz_dir', [ $this, 'add_listing_location_metabox' ] );
-        add_action( 'save_post_at_biz_dir', [ $this, 'save_listing_location_metabox' ], 20 );
         add_action( 'save_post_at_biz_dir', [ $this, 'sync_listing_from_directorist_meta' ], 99 );
         add_action( 'atbdp_listing_inserted', [ $this, 'sync_listing_from_directorist_meta' ], 30 );
         add_action( 'atbdp_listing_updated', [ $this, 'sync_listing_from_directorist_meta' ], 30 );
@@ -71,6 +82,7 @@ final class Directorist_Shopping_Centres {
         add_shortcode( 'directorist_shopping_centre_deals', [ $this, 'centre_deals_shortcode' ] );
         add_filter( 'template_include', [ $this, 'template_include' ] );
         add_filter( 'body_class', [ $this, 'body_class' ] );
+        add_action( 'template_redirect', [ $this, 'protect_hidden_centre_pages' ], 2 );
         add_action( 'template_redirect', [ $this, 'maybe_redirect_exact_centre_search' ], 3 );
         add_action( 'rest_api_init', [ $this, 'register_rest_routes' ] );
 
@@ -183,18 +195,85 @@ final class Directorist_Shopping_Centres {
         }
     }
 
+    private function get_archive_settings_defaults() {
+        return [
+            'show_empty'      => 1,
+            'per_page'        => 12,
+            'search_enabled'  => 1,
+            'sort'            => 'name',
+            'show_deal_count' => 1,
+        ];
+    }
+
+    private function sanitize_archive_settings( $settings ) {
+        $settings = is_array( $settings ) ? $settings : [];
+        $per_page = isset( $settings['per_page'] ) ? absint( $settings['per_page'] ) : 12;
+        $sort     = isset( $settings['sort'] ) ? sanitize_key( $settings['sort'] ) : 'name';
+
+        return [
+            'show_empty'      => empty( $settings['show_empty'] ) ? 0 : 1,
+            'per_page'        => in_array( $per_page, [ 0, 6, 12, 24 ], true ) ? $per_page : 12,
+            'search_enabled'  => empty( $settings['search_enabled'] ) ? 0 : 1,
+            'sort'            => in_array( $sort, [ 'name', 'deal_count', 'newest' ], true ) ? $sort : 'name',
+            'show_deal_count' => empty( $settings['show_deal_count'] ) ? 0 : 1,
+        ];
+    }
+
+    private function get_archive_settings() {
+        $settings = get_option( self::ARCHIVE_SETTINGS_OPTION, [] );
+        $settings = wp_parse_args( is_array( $settings ) ? $settings : [], $this->get_archive_settings_defaults() );
+        return $this->sanitize_archive_settings( $settings );
+    }
+
+    private function should_show_empty_centres() {
+        $settings = $this->get_archive_settings();
+        return ! empty( $settings['show_empty'] );
+    }
+
     public function render_admin_page() {
-        $synced = null;
+        $synced                 = null;
+        $migration_report       = null;
+        $archive_settings_saved = false;
         if ( isset( $_POST['dsc_sync_listings'] ) && check_admin_referer( 'dsc_sync_listings_action', 'dsc_sync_listings_nonce' ) ) {
             $synced = $this->sync_all_existing_listings();
         }
+        if ( isset( $_POST['dsc_migrate_legacy_centres'] ) && check_admin_referer( 'dsc_migrate_legacy_centres_action', 'dsc_migrate_legacy_centres_nonce' ) ) {
+            $migration_report = $this->migrate_legacy_shopping_centre_tags();
+        }
+        if ( isset( $_POST['dsc_save_archive_settings'] ) && check_admin_referer( 'dsc_save_archive_settings_action', 'dsc_save_archive_settings_nonce' ) ) {
+            $submitted_settings = isset( $_POST['dsc_archive_settings'] ) ? wp_unslash( $_POST['dsc_archive_settings'] ) : [];
+            update_option( self::ARCHIVE_SETTINGS_OPTION, $this->sanitize_archive_settings( $submitted_settings ) );
+            $archive_settings_saved = true;
+        }
 
-        $missing_units = $this->get_missing_unit_listings();
+        $missing_units     = $this->get_missing_unit_listings();
+        $migration_preview = $this->get_legacy_migration_preview();
+        $archive_settings  = $this->get_archive_settings();
         ?>
         <div class="wrap">
             <h1><?php esc_html_e( 'Shopping Centre Tools', 'directorist-shopping-centres' ); ?></h1>
             <?php if ( null !== $synced ) : ?>
                 <div class="notice notice-success is-dismissible"><p><?php printf( esc_html__( 'Synced %d Directorist listings.', 'directorist-shopping-centres' ), absint( $synced ) ); ?></p></div>
+            <?php endif; ?>
+            <?php if ( $archive_settings_saved ) : ?>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Shopping Centre archive settings saved.', 'directorist-shopping-centres' ); ?></p></div>
+            <?php endif; ?>
+            <?php if ( is_array( $migration_report ) ) : ?>
+                <?php $notice_class = empty( $migration_report['errors'] ) ? 'notice-success' : 'notice-warning'; ?>
+                <div class="notice <?php echo esc_attr( $notice_class ); ?> is-dismissible"><p>
+                    <?php
+                    printf(
+                        esc_html__( 'Legacy centre import complete: %1$d created, %2$d existing centres reused, and %3$d listings linked. The original tags were kept.', 'directorist-shopping-centres' ),
+                        absint( $migration_report['created'] ),
+                        absint( $migration_report['existing'] ),
+                        absint( $migration_report['assigned_listings'] )
+                    );
+                    ?>
+                </p>
+                <?php if ( ! empty( $migration_report['errors'] ) ) : ?>
+                    <p><?php echo esc_html( implode( ' ', $migration_report['errors'] ) ); ?></p>
+                <?php endif; ?>
+                </div>
             <?php endif; ?>
 
             <p><?php esc_html_e( 'Manage canonical centre records here. Listings assigned to a centre inherit its discovery address while their existing address metadata remains untouched.', 'directorist-shopping-centres' ); ?></p>
@@ -211,6 +290,60 @@ final class Directorist_Shopping_Centres {
 
             <p><a class="button button-primary" href="<?php echo esc_url( admin_url( 'edit-tags.php?taxonomy=' . self::TAXONOMY . '&post_type=at_biz_dir' ) ); ?>"><?php esc_html_e( 'Manage Shopping Centres', 'directorist-shopping-centres' ); ?></a></p>
             <p><a class="button" href="<?php echo esc_url( home_url( '/shopping-centres/' ) ); ?>" target="_blank" rel="noopener"><?php esc_html_e( 'View Shopping Centres Archive', 'directorist-shopping-centres' ); ?></a></p>
+
+            <h2><?php esc_html_e( 'Archive display settings', 'directorist-shopping-centres' ); ?></h2>
+            <p><?php esc_html_e( 'These settings control the complete Shopping Centres archive. The homepage Shopping Centres widget keeps its separate Elementor controls.', 'directorist-shopping-centres' ); ?></p>
+            <form method="post">
+                <?php wp_nonce_field( 'dsc_save_archive_settings_action', 'dsc_save_archive_settings_nonce' ); ?>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Empty centres', 'directorist-shopping-centres' ); ?></th>
+                        <td><label><input type="checkbox" name="dsc_archive_settings[show_empty]" value="1" <?php checked( ! empty( $archive_settings['show_empty'] ) ); ?>> <?php esc_html_e( 'Show publicly visible centres with no current deals', 'directorist-shopping-centres' ); ?></label></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="dsc-archive-per-page"><?php esc_html_e( 'Centres per page', 'directorist-shopping-centres' ); ?></label></th>
+                        <td><select id="dsc-archive-per-page" name="dsc_archive_settings[per_page]">
+                            <?php foreach ( [ 6 => '6', 12 => '12', 24 => '24', 0 => __( 'All', 'directorist-shopping-centres' ) ] as $value => $label ) : ?>
+                                <option value="<?php echo esc_attr( $value ); ?>" <?php selected( absint( $archive_settings['per_page'] ), $value ); ?>><?php echo esc_html( $label ); ?></option>
+                            <?php endforeach; ?>
+                        </select></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Archive search', 'directorist-shopping-centres' ); ?></th>
+                        <td><label><input type="checkbox" name="dsc_archive_settings[search_enabled]" value="1" <?php checked( ! empty( $archive_settings['search_enabled'] ) ); ?>> <?php esc_html_e( 'Enable search by centre name, suburb, state, or postcode', 'directorist-shopping-centres' ); ?></label></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="dsc-archive-sort"><?php esc_html_e( 'Sort order', 'directorist-shopping-centres' ); ?></label></th>
+                        <td><select id="dsc-archive-sort" name="dsc_archive_settings[sort]">
+                            <option value="name" <?php selected( $archive_settings['sort'], 'name' ); ?>><?php esc_html_e( 'Name (A–Z)', 'directorist-shopping-centres' ); ?></option>
+                            <option value="deal_count" <?php selected( $archive_settings['sort'], 'deal_count' ); ?>><?php esc_html_e( 'Current deal count (high to low)', 'directorist-shopping-centres' ); ?></option>
+                            <option value="newest" <?php selected( $archive_settings['sort'], 'newest' ); ?>><?php esc_html_e( 'Recently added', 'directorist-shopping-centres' ); ?></option>
+                        </select></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Deal count', 'directorist-shopping-centres' ); ?></th>
+                        <td><label><input type="checkbox" name="dsc_archive_settings[show_deal_count]" value="1" <?php checked( ! empty( $archive_settings['show_deal_count'] ) ); ?>> <?php esc_html_e( 'Show the current-deal count on archive cards', 'directorist-shopping-centres' ); ?></label></td>
+                    </tr>
+                </table>
+                <p class="submit"><button type="submit" class="button button-primary" name="dsc_save_archive_settings" value="1"><?php esc_html_e( 'Save Archive Settings', 'directorist-shopping-centres' ); ?></button></p>
+            </form>
+
+            <h2><?php esc_html_e( 'Legacy Shopping Centre import', 'directorist-shopping-centres' ); ?></h2>
+            <?php if ( ! empty( $migration_preview['error'] ) ) : ?>
+                <p><?php echo esc_html( $migration_preview['error'] ); ?></p>
+            <?php else : ?>
+                <p><?php esc_html_e( 'Import the old Shopping Centre / Venue tags into the managed Shopping Centre system. Only actual centres nested below the Australian state groups are included; state headings and generic venue types are excluded. Existing centres are reused, and the legacy tags remain untouched.', 'directorist-shopping-centres' ); ?></p>
+                <ul>
+                    <li><?php printf( esc_html__( 'Eligible legacy centres: %d', 'directorist-shopping-centres' ), absint( $migration_preview['eligible'] ) ); ?></li>
+                    <li><?php printf( esc_html__( 'Already represented in the managed system: %d', 'directorist-shopping-centres' ), absint( $migration_preview['existing'] ) ); ?></li>
+                    <li><?php printf( esc_html__( 'New managed centres to create: %d', 'directorist-shopping-centres' ), absint( $migration_preview['new'] ) ); ?></li>
+                    <li><?php printf( esc_html__( 'Legacy centre tags with a reusable image: %d', 'directorist-shopping-centres' ), absint( $migration_preview['with_images'] ) ); ?></li>
+                </ul>
+                <form method="post">
+                    <?php wp_nonce_field( 'dsc_migrate_legacy_centres_action', 'dsc_migrate_legacy_centres_nonce' ); ?>
+                    <button type="submit" class="button button-primary" name="dsc_migrate_legacy_centres" value="1" onclick="return confirm('<?php echo esc_js( __( 'Import the eligible legacy Shopping Centre tags now? Existing centres and legacy tags will not be deleted.', 'directorist-shopping-centres' ) ); ?>');"><?php esc_html_e( 'Import / Sync Legacy Centres', 'directorist-shopping-centres' ); ?></button>
+                </form>
+            <?php endif; ?>
 
             <h2><?php esc_html_e( 'Existing listings needing a Shop/Unit Number', 'directorist-shopping-centres' ); ?></h2>
             <?php if ( empty( $missing_units ) ) : ?>
@@ -261,6 +394,7 @@ final class Directorist_Shopping_Centres {
         $this->render_add_term_text_field( 'dsc_suburb', __( 'Suburb', 'directorist-shopping-centres' ) );
         $this->render_add_term_text_field( 'dsc_state', __( 'State', 'directorist-shopping-centres' ) );
         $this->render_add_term_text_field( 'dsc_postcode', __( 'Postcode', 'directorist-shopping-centres' ) );
+        $this->render_add_visibility_field();
     }
 
     public function edit_term_fields( $term ) {
@@ -270,6 +404,7 @@ final class Directorist_Shopping_Centres {
         $this->render_edit_term_text_field( $term, 'dsc_suburb', self::TERM_SUBURB_META, __( 'Suburb', 'directorist-shopping-centres' ) );
         $this->render_edit_term_text_field( $term, 'dsc_state', self::TERM_STATE_META, __( 'State', 'directorist-shopping-centres' ) );
         $this->render_edit_term_text_field( $term, 'dsc_postcode', self::TERM_POSTCODE_META, __( 'Postcode', 'directorist-shopping-centres' ) );
+        $this->render_edit_visibility_field( $term );
     }
 
     private function render_term_image_control( $editing, $term = null ) {
@@ -301,6 +436,24 @@ final class Directorist_Shopping_Centres {
         <?php
     }
 
+    private function render_add_visibility_field() {
+        ?>
+        <div class="form-field term-dsc-public-wrap">
+            <label for="dsc-public-visibility"><input type="checkbox" id="dsc-public-visibility" name="dsc_public_visibility" value="visible" checked> <?php esc_html_e( 'Show this Shopping Centre publicly', 'directorist-shopping-centres' ); ?></label>
+            <p class="description"><?php esc_html_e( 'Uncheck this while preparing a centre or rolling out one state at a time. Hidden centres never appear publicly; empty-centre behavior is controlled in Shopping Centre Tools.', 'directorist-shopping-centres' ); ?></p>
+        </div>
+        <?php
+    }
+
+    private function render_edit_visibility_field( WP_Term $term ) {
+        ?>
+        <tr class="form-field term-dsc-public-wrap"><th scope="row"><?php esc_html_e( 'Public visibility', 'directorist-shopping-centres' ); ?></th><td>
+            <label for="dsc-public-visibility"><input type="checkbox" id="dsc-public-visibility" name="dsc_public_visibility" value="visible" <?php checked( $this->is_centre_public( $term ) ); ?>> <?php esc_html_e( 'Show this Shopping Centre publicly', 'directorist-shopping-centres' ); ?></label>
+            <p class="description"><?php esc_html_e( 'Uncheck this while preparing a centre or rolling out one state at a time. The record, image, address and linked listings are preserved.', 'directorist-shopping-centres' ); ?></p>
+        </td></tr>
+        <?php
+    }
+
     public function save_term_fields( $term_id ) {
         if ( ! isset( $_POST['dsc_term_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['dsc_term_nonce'] ) ), 'dsc_save_term' ) || ! current_user_can( 'manage_categories' ) ) {
             return;
@@ -321,6 +474,22 @@ final class Directorist_Shopping_Centres {
             $value = 'dsc_image_id' === $request_key ? absint( $_POST[ $request_key ] ) : sanitize_text_field( wp_unslash( $_POST[ $request_key ] ) );
             update_term_meta( $term_id, $meta_key, $value );
         }
+
+        update_term_meta( $term_id, self::TERM_PUBLIC_META, isset( $_POST['dsc_public_visibility'] ) ? 'visible' : 'hidden' );
+    }
+
+    public function add_visibility_column( $columns ) {
+        $columns['dsc_public_visibility'] = __( 'Public', 'directorist-shopping-centres' );
+        return $columns;
+    }
+
+    public function render_visibility_column( $content, $column_name, $term_id ) {
+        if ( 'dsc_public_visibility' !== $column_name ) {
+            return $content;
+        }
+
+        $term = get_term( $term_id, self::TAXONOMY );
+        return $term instanceof WP_Term && $this->is_centre_public( $term ) ? esc_html__( 'Visible', 'directorist-shopping-centres' ) : esc_html__( 'Hidden', 'directorist-shopping-centres' );
     }
 
     public function add_listing_location_metabox() {
@@ -456,13 +625,22 @@ final class Directorist_Shopping_Centres {
         $atts = shortcode_atts(
             [
                 'title'      => __( 'Shop deals by shopping centre', 'directorist-shopping-centres' ),
-                'hide_empty' => 0,
+                'hide_empty' => 1,
                 'number'     => 0,
             ],
             $atts,
             'directorist_shopping_centres'
         );
-        $terms = get_terms( [ 'taxonomy' => self::TAXONOMY, 'hide_empty' => (bool) absint( $atts['hide_empty'] ), 'number' => absint( $atts['number'] ), 'orderby' => 'name', 'order' => 'ASC' ] );
+        $terms = get_terms( [ 'taxonomy' => self::TAXONOMY, 'hide_empty' => false, 'number' => 0, 'orderby' => 'name', 'order' => 'ASC' ] );
+        if ( ! is_wp_error( $terms ) ) {
+            $hide_empty = (bool) absint( $atts['hide_empty'] );
+            $terms = array_values( array_filter( $terms, function ( $term ) use ( $hide_empty ) {
+                return $this->is_centre_public( $term ) && ( ! $hide_empty || $this->get_deal_count_for_term( $term ) > 0 );
+            } ) );
+        }
+        if ( ! is_wp_error( $terms ) && absint( $atts['number'] ) ) {
+            $terms = array_slice( $terms, 0, absint( $atts['number'] ) );
+        }
         if ( is_wp_error( $terms ) || empty( $terms ) ) {
             return '<div class="dsc-empty">' . esc_html__( 'No shopping centres found yet.', 'directorist-shopping-centres' ) . '</div>';
         }
@@ -480,22 +658,78 @@ final class Directorist_Shopping_Centres {
     }
 
     public function shopping_centres_archive_shortcode() {
-        $page     = max( 1, get_query_var( 'paged' ), isset( $_GET['centre_page'] ) ? absint( $_GET['centre_page'] ) : 1 );
-        $per_page = 12;
-        $total    = wp_count_terms( [ 'taxonomy' => self::TAXONOMY, 'hide_empty' => false ] );
-        $terms    = get_terms( [ 'taxonomy' => self::TAXONOMY, 'hide_empty' => false, 'number' => $per_page, 'offset' => ( $page - 1 ) * $per_page, 'orderby' => 'name' ] );
+        $settings    = $this->get_archive_settings();
+        $page        = max( 1, get_query_var( 'paged' ), isset( $_GET['centre_page'] ) ? absint( $_GET['centre_page'] ) : 1 );
+        $per_page    = absint( $settings['per_page'] );
+        $search      = ! empty( $settings['search_enabled'] ) && isset( $_GET['dsc_q'] ) ? trim( sanitize_text_field( wp_unslash( $_GET['dsc_q'] ) ) ) : '';
+        $all_terms   = $this->get_public_centres( $search, $settings );
+        $total       = is_wp_error( $all_terms ) ? 0 : count( $all_terms );
+        $terms       = is_wp_error( $all_terms ) || 0 === $per_page ? $all_terms : array_slice( $all_terms, ( $page - 1 ) * $per_page, $per_page );
+        $archive_url = get_permalink();
 
         ob_start(); ?>
         <section class="dsc-archive">
             <header class="dsc-title-banner"><div><p><?php esc_html_e( 'Discover local deals', 'directorist-shopping-centres' ); ?></p><h1><?php esc_html_e( 'Shopping Centres', 'directorist-shopping-centres' ); ?></h1></div></header>
             <div class="dsc-archive__content">
-                <?php if ( is_wp_error( $terms ) || empty( $terms ) ) : ?><div class="dsc-empty"><?php esc_html_e( 'No shopping centres found yet.', 'directorist-shopping-centres' ); ?></div><?php else : ?>
-                    <div class="dsc-archive__grid"><?php foreach ( $terms as $term ) { echo $this->render_centre_tile( $term ); } // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
-                    <?php if ( $total > $per_page ) : ?><nav class="dsc-pagination" aria-label="<?php esc_attr_e( 'Shopping Centre pages', 'directorist-shopping-centres' ); ?>"><?php echo wp_kses_post( paginate_links( [ 'current' => $page, 'total' => (int) ceil( $total / $per_page ), 'format' => '?centre_page=%#%' ] ) ); ?></nav><?php endif; ?>
+                <?php if ( ! empty( $settings['search_enabled'] ) ) : ?>
+                    <form class="dsc-centre-search" action="<?php echo esc_url( $archive_url ); ?>" method="get" role="search">
+                        <label class="screen-reader-text" for="dsc-centre-search-input"><?php esc_html_e( 'Search Shopping Centres', 'directorist-shopping-centres' ); ?></label>
+                        <input id="dsc-centre-search-input" type="search" name="dsc_q" value="<?php echo esc_attr( $search ); ?>" placeholder="<?php esc_attr_e( 'Search by centre name, suburb, state or postcode', 'directorist-shopping-centres' ); ?>">
+                        <button type="submit"><?php esc_html_e( 'Search', 'directorist-shopping-centres' ); ?></button>
+                        <?php if ( '' !== $search ) : ?><a href="<?php echo esc_url( $archive_url ); ?>"><?php esc_html_e( 'Clear', 'directorist-shopping-centres' ); ?></a><?php endif; ?>
+                    </form>
+                <?php endif; ?>
+                <?php if ( is_wp_error( $terms ) || empty( $terms ) ) : ?><div class="dsc-empty"><?php echo '' !== $search ? esc_html__( 'No shopping centres match your search.', 'directorist-shopping-centres' ) : ( ! empty( $settings['show_empty'] ) ? esc_html__( 'No shopping centres found yet.', 'directorist-shopping-centres' ) : esc_html__( 'No shopping centres with current deals found yet.', 'directorist-shopping-centres' ) ); ?></div><?php else : ?>
+                    <div class="dsc-archive__grid"><?php foreach ( $terms as $term ) { echo $this->render_centre_tile( $term, ! empty( $settings['show_deal_count'] ) ); } // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
+                    <?php if ( $per_page > 0 && $total > $per_page ) : ?><nav class="dsc-pagination" aria-label="<?php esc_attr_e( 'Shopping Centre pages', 'directorist-shopping-centres' ); ?>"><?php echo wp_kses_post( paginate_links( [ 'base' => add_query_arg( 'centre_page', '%#%', $archive_url ), 'format' => '', 'current' => $page, 'total' => (int) ceil( $total / $per_page ), 'add_args' => '' !== $search ? [ 'dsc_q' => $search ] : [] ] ) ); ?></nav><?php endif; ?>
                 <?php endif; ?>
             </div>
         </section>
         <?php return ob_get_clean();
+    }
+
+    /**
+     * Return publicly visible centres using the configured empty-centre,
+     * search, and sort behavior.
+     */
+    private function get_public_centres( $search = '', $settings = null ) {
+        $settings = is_array( $settings ) ? $this->sanitize_archive_settings( $settings ) : $this->get_archive_settings();
+        $terms = get_terms( [ 'taxonomy' => self::TAXONOMY, 'hide_empty' => false, 'number' => 0, 'orderby' => 'name', 'order' => 'ASC' ] );
+        if ( is_wp_error( $terms ) ) {
+            return $terms;
+        }
+
+        $needle = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( (string) $search ) ) : strtolower( trim( (string) $search ) );
+        $terms = array_values(
+            array_filter(
+                $terms,
+                function ( $term ) use ( $needle, $settings ) {
+                    if ( ! $this->is_centre_public( $term ) || ( empty( $settings['show_empty'] ) && $this->get_deal_count_for_term( $term ) < 1 ) ) {
+                        return false;
+                    }
+                    if ( '' === $needle ) {
+                        return true;
+                    }
+                    $haystack = implode( ' ', [ $term->name, $this->get_formatted_address( $term ) ] );
+                    $haystack = function_exists( 'mb_strtolower' ) ? mb_strtolower( $haystack ) : strtolower( $haystack );
+                    return false !== strpos( $haystack, $needle );
+                }
+            )
+        );
+
+        if ( 'deal_count' === $settings['sort'] ) {
+            usort(
+                $terms,
+                function ( $a, $b ) {
+                    $count_difference = $this->get_deal_count_for_term( $b ) <=> $this->get_deal_count_for_term( $a );
+                    return 0 !== $count_difference ? $count_difference : strcasecmp( $a->name, $b->name );
+                }
+            );
+        } elseif ( 'newest' === $settings['sort'] ) {
+            usort( $terms, static function ( $a, $b ) { return $b->term_id <=> $a->term_id; } );
+        }
+
+        return $terms;
     }
 
     public function centre_deals_shortcode( $atts ) {
@@ -510,10 +744,34 @@ final class Directorist_Shopping_Centres {
         if ( ! $term ) {
             $term = get_term_by( 'name', $value, self::TAXONOMY );
         }
-        return $term instanceof WP_Term ? $term : null;
+        return $term instanceof WP_Term && $this->is_centre_public( $term ) && ( $this->should_show_empty_centres() || $this->get_deal_count_for_term( $term ) > 0 ) ? $term : null;
     }
 
-    private function render_centre_tile( WP_Term $term ) {
+    /**
+     * Existing terms remain public until an administrator explicitly hides
+     * them, so enabling this control does not remove current data from view.
+     */
+    private function is_centre_public( WP_Term $term ) {
+        return 'hidden' !== get_term_meta( $term->term_id, self::TERM_PUBLIC_META, true );
+    }
+
+    public function protect_hidden_centre_pages() {
+        if ( ! is_tax( self::TAXONOMY ) ) {
+            return;
+        }
+
+        $term = get_queried_object();
+        if ( $term instanceof WP_Term && $this->is_centre_public( $term ) && ( $this->should_show_empty_centres() || $this->get_deal_count_for_term( $term ) > 0 ) ) {
+            return;
+        }
+
+        global $wp_query;
+        $wp_query->set_404();
+        status_header( 404 );
+        nocache_headers();
+    }
+
+    private function render_centre_tile( WP_Term $term, $show_deal_count = true ) {
         $link       = get_term_link( $term );
         $image_url  = $this->get_term_image_url( $term, 'large' );
         $deal_count = $this->get_deal_count_for_term( $term );
@@ -525,7 +783,7 @@ final class Directorist_Shopping_Centres {
         <article class="dsc-centre-card" role="group">
             <a href="<?php echo esc_url( $link ); ?>" class="dsc-centre-card__link">
                 <span class="dsc-centre-card__image<?php echo $image_url ? '' : ' dsc-centre-card__image--fallback'; ?>"><?php if ( $image_url ) : ?><img src="<?php echo esc_url( $image_url ); ?>" alt="" loading="lazy"><?php else : ?><span aria-hidden="true">ISO</span><?php endif; ?></span>
-                <span class="dsc-centre-card__body"><span class="dsc-centre-card__name"><?php echo esc_html( $term->name ); ?></span><span class="dsc-centre-card__count"><?php printf( esc_html( _n( '%d current deal', '%d current deals', $deal_count, 'directorist-shopping-centres' ) ), absint( $deal_count ) ); ?></span><?php $address = $this->get_formatted_address( $term ); if ( $address ) : ?><span class="dsc-centre-card__address"><?php echo esc_html( $address ); ?></span><?php endif; ?></span>
+                <span class="dsc-centre-card__body"><span class="dsc-centre-card__name"><?php echo esc_html( $term->name ); ?></span><?php if ( $show_deal_count ) : ?><span class="dsc-centre-card__count"><?php printf( esc_html( _n( '%d current deal', '%d current deals', $deal_count, 'directorist-shopping-centres' ) ), absint( $deal_count ) ); ?></span><?php endif; ?><?php $address = $this->get_formatted_address( $term ); if ( $address ) : ?><span class="dsc-centre-card__address"><?php echo esc_html( $address ); ?></span><?php endif; ?></span>
             </a>
         </article>
         <?php return ob_get_clean();
@@ -609,7 +867,10 @@ final class Directorist_Shopping_Centres {
     }
 
     private function get_deal_count_for_term( WP_Term $term ) {
-        return count( $this->get_deals_for_term( $term ) );
+        if ( ! array_key_exists( $term->term_id, $this->deal_count_cache ) ) {
+            $this->deal_count_cache[ $term->term_id ] = count( $this->get_deals_for_term( $term ) );
+        }
+        return $this->deal_count_cache[ $term->term_id ];
     }
 
     private function get_deals_for_term( WP_Term $term ) {
@@ -700,16 +961,10 @@ final class Directorist_Shopping_Centres {
             return rest_ensure_response( [] );
         }
         $limit   = min( 12, max( 1, absint( $request->get_param( 'limit' ) ) ) );
-        $terms   = get_terms( [ 'taxonomy' => self::TAXONOMY, 'hide_empty' => false, 'orderby' => 'name' ] );
-        $needle  = function_exists( 'mb_strtolower' ) ? mb_strtolower( $query ) : strtolower( $query );
+        $terms   = $this->get_public_centres( $query );
         $results = [];
         if ( ! is_wp_error( $terms ) ) {
             foreach ( $terms as $term ) {
-                $haystack = implode( ' ', [ $term->name, $this->get_formatted_address( $term ) ] );
-                $haystack = function_exists( 'mb_strtolower' ) ? mb_strtolower( $haystack ) : strtolower( $haystack );
-                if ( false === strpos( $haystack, $needle ) ) {
-                    continue;
-                }
                 $link = get_term_link( $term );
                 $results[] = [ 'id' => $term->term_id, 'name' => $term->name, 'address' => $this->get_formatted_address( $term ), 'url' => is_wp_error( $link ) ? '' : $link, 'image' => $this->get_term_image_url( $term, 'medium' ), 'deal_count' => $this->get_deal_count_for_term( $term ) ];
                 if ( count( $results ) >= $limit ) {
@@ -729,7 +984,7 @@ final class Directorist_Shopping_Centres {
             return;
         }
         $term = get_term_by( 'name', $query, self::TAXONOMY );
-        if ( ! $term instanceof WP_Term ) {
+        if ( ! $term instanceof WP_Term || ! $this->is_centre_public( $term ) || ( ! $this->should_show_empty_centres() && $this->get_deal_count_for_term( $term ) < 1 ) ) {
             return;
         }
         $link = get_term_link( $term );
@@ -804,6 +1059,239 @@ final class Directorist_Shopping_Centres {
         return count( $ids );
     }
 
+    public function get_legacy_migration_preview() {
+        $candidates = $this->get_legacy_centre_candidates();
+        if ( is_wp_error( $candidates ) ) {
+            return [
+                'eligible'    => 0,
+                'existing'    => 0,
+                'new'         => 0,
+                'with_images' => 0,
+                'error'       => $candidates->get_error_message(),
+            ];
+        }
+
+        $preview = [
+            'eligible'    => count( $candidates ),
+            'existing'    => 0,
+            'new'         => 0,
+            'with_images' => 0,
+            'error'       => '',
+        ];
+
+        foreach ( $candidates as $candidate ) {
+            $target = $this->find_managed_centre_for_legacy_term( $candidate['term'] );
+            $preview[ $target instanceof WP_Term ? 'existing' : 'new' ]++;
+            if ( $this->get_legacy_term_image_id( $candidate['term']->term_id ) ) {
+                $preview['with_images']++;
+            }
+        }
+
+        return $preview;
+    }
+
+    public function migrate_legacy_shopping_centre_tags() {
+        $candidates = $this->get_legacy_centre_candidates();
+        $report     = [
+            'eligible'            => is_wp_error( $candidates ) ? 0 : count( $candidates ),
+            'created'             => 0,
+            'existing'            => 0,
+            'assigned_listings'   => 0,
+            'skipped_assignments' => 0,
+            'with_images'         => 0,
+            'errors'              => [],
+            'created_term_ids'    => [],
+        ];
+
+        if ( is_wp_error( $candidates ) ) {
+            $report['errors'][] = $candidates->get_error_message();
+            return $report;
+        }
+
+        $this->create_rollback_snapshot();
+
+        foreach ( $candidates as $candidate ) {
+            $legacy_term = $candidate['term'];
+            $target      = $this->find_managed_centre_for_legacy_term( $legacy_term );
+
+            if ( ! $target instanceof WP_Term ) {
+                $created = wp_insert_term(
+                    $legacy_term->name,
+                    self::TAXONOMY,
+                    [
+                        'slug'        => $legacy_term->slug,
+                        'description' => $legacy_term->description,
+                    ]
+                );
+                if ( is_wp_error( $created ) ) {
+                    $report['errors'][] = sprintf( __( '%1$s: %2$s', 'directorist-shopping-centres' ), $legacy_term->name, $created->get_error_message() );
+                    continue;
+                }
+                $target = get_term( absint( $created['term_id'] ), self::TAXONOMY );
+                if ( ! $target instanceof WP_Term ) {
+                    $report['errors'][] = sprintf( __( '%s could not be loaded after import.', 'directorist-shopping-centres' ), $legacy_term->name );
+                    continue;
+                }
+                $report['created']++;
+                $report['created_term_ids'][] = $target->term_id;
+            } else {
+                $report['existing']++;
+                if ( '' === trim( (string) $target->description ) && '' !== trim( (string) $legacy_term->description ) ) {
+                    wp_update_term( $target->term_id, self::TAXONOMY, [ 'description' => $legacy_term->description ] );
+                }
+            }
+
+            $source_ids = array_map( 'absint', get_term_meta( $target->term_id, self::TERM_LEGACY_TAG_META, false ) );
+            if ( ! in_array( $legacy_term->term_id, $source_ids, true ) ) {
+                add_term_meta( $target->term_id, self::TERM_LEGACY_TAG_META, $legacy_term->term_id, false );
+            }
+
+            if ( '' === trim( (string) get_term_meta( $target->term_id, self::TERM_STATE_META, true ) ) ) {
+                update_term_meta( $target->term_id, self::TERM_STATE_META, $candidate['state'] );
+            }
+
+            $image_id = $this->get_legacy_term_image_id( $legacy_term->term_id );
+            if ( $image_id ) {
+                $report['with_images']++;
+                if ( ! absint( get_term_meta( $target->term_id, self::TERM_IMAGE_META, true ) ) ) {
+                    update_term_meta( $target->term_id, self::TERM_IMAGE_META, $image_id );
+                }
+            }
+
+            $listing_ids = get_objects_in_term( $legacy_term->term_id, self::LEGACY_TAXONOMY );
+            if ( is_wp_error( $listing_ids ) ) {
+                $report['errors'][] = sprintf( __( '%1$s listings: %2$s', 'directorist-shopping-centres' ), $legacy_term->name, $listing_ids->get_error_message() );
+                continue;
+            }
+
+            foreach ( array_map( 'absint', $listing_ids ) as $listing_id ) {
+                if ( 'at_biz_dir' !== get_post_type( $listing_id ) ) {
+                    continue;
+                }
+                $assigned = wp_get_object_terms( $listing_id, self::TAXONOMY );
+                if ( ! is_wp_error( $assigned ) && ! empty( $assigned ) ) {
+                    $report['skipped_assignments']++;
+                    continue;
+                }
+
+                $result = wp_set_object_terms( $listing_id, [ $target->term_id ], self::TAXONOMY, false );
+                if ( is_wp_error( $result ) ) {
+                    $report['errors'][] = sprintf( __( 'Listing %1$d: %2$s', 'directorist-shopping-centres' ), $listing_id, $result->get_error_message() );
+                    continue;
+                }
+                update_post_meta( $listing_id, self::META_IN_CENTRE, 'yes' );
+                update_post_meta( $listing_id, self::META_CENTRE_ID, $target->term_id );
+                update_post_meta( $listing_id, self::META_CENTRE_ADDRESS, $this->get_formatted_address( $target ) );
+                $this->update_listing_centre_meta( $listing_id, $target->name );
+                $report['assigned_listings']++;
+            }
+        }
+
+        update_option( 'dsc_legacy_migration_' . gmdate( 'Ymd_His' ), $report, false );
+
+        return $report;
+    }
+
+    private function get_legacy_centre_candidates() {
+        if ( ! taxonomy_exists( self::LEGACY_TAXONOMY ) ) {
+            return new WP_Error( 'dsc_legacy_taxonomy_missing', __( 'The legacy Directorist Tags taxonomy is not available.', 'directorist-shopping-centres' ) );
+        }
+
+        $root = get_term_by( 'slug', self::LEGACY_ROOT_SLUG, self::LEGACY_TAXONOMY );
+        if ( ! $root instanceof WP_Term ) {
+            return new WP_Error( 'dsc_legacy_root_missing', __( 'The legacy Shopping Centre / Venue tag group was not found.', 'directorist-shopping-centres' ) );
+        }
+
+        $all_terms = get_terms(
+            [
+                'taxonomy'   => self::LEGACY_TAXONOMY,
+                'hide_empty' => false,
+                'orderby'    => 'name',
+                'order'      => 'ASC',
+            ]
+        );
+        if ( is_wp_error( $all_terms ) ) {
+            return $all_terms;
+        }
+
+        $terms_by_slug = [];
+        foreach ( $all_terms as $legacy_term ) {
+            $terms_by_slug[ $legacy_term->slug ] = $legacy_term;
+        }
+
+        $state_groups = [
+            'nsw-centres' => 'NSW',
+            'vic-centres' => 'VIC',
+            'qld-centres' => 'QLD',
+            'wa-centres'  => 'WA',
+            'sa-centres'  => 'SA',
+            'tas-centres' => 'TAS',
+            'act-centres' => 'ACT',
+            'nt-centres'  => 'NT',
+        ];
+        $state_groups = apply_filters( 'directorist_shopping_centres_legacy_state_groups', $state_groups );
+        $candidates   = [];
+
+        foreach ( $state_groups as $group_slug => $state ) {
+            $group = isset( $terms_by_slug[ $group_slug ] ) ? $terms_by_slug[ $group_slug ] : null;
+            if ( ! $group instanceof WP_Term || absint( $group->parent ) !== absint( $root->term_id ) ) {
+                continue;
+            }
+            foreach ( $all_terms as $term ) {
+                if ( absint( $term->parent ) !== absint( $group->term_id ) ) {
+                    continue;
+                }
+                $candidates[] = [
+                    'term'  => $term,
+                    'state' => sanitize_text_field( $state ),
+                ];
+            }
+        }
+
+        usort(
+            $candidates,
+            static function ( $left, $right ) {
+                return strcasecmp( $left['term']->name, $right['term']->name );
+            }
+        );
+
+        return $candidates;
+    }
+
+    private function find_managed_centre_for_legacy_term( WP_Term $legacy_term ) {
+        $aliases = apply_filters(
+            'directorist_shopping_centres_legacy_aliases',
+            [
+                'broadway-shopping-centre' => 'broadway-sydney',
+                'westfield-sydney-cbd'      => 'westfield-sydney',
+            ]
+        );
+        $slug    = isset( $aliases[ $legacy_term->slug ] ) ? sanitize_title( $aliases[ $legacy_term->slug ] ) : $legacy_term->slug;
+        $target  = get_term_by( 'slug', $slug, self::TAXONOMY );
+
+        if ( ! $target instanceof WP_Term ) {
+            $target = get_term_by( 'name', $legacy_term->name, self::TAXONOMY );
+        }
+
+        return $target instanceof WP_Term ? $target : null;
+    }
+
+    private function get_legacy_term_image_id( $legacy_term_id ) {
+        $meta_keys = apply_filters(
+            'directorist_shopping_centres_legacy_image_meta_keys',
+            [ self::TERM_IMAGE_META, 'image_id', '_image_id', 'attachment_id', '_thumbnail_id' ]
+        );
+
+        foreach ( $meta_keys as $meta_key ) {
+            $image_id = absint( get_term_meta( $legacy_term_id, $meta_key, true ) );
+            if ( $image_id && wp_attachment_is_image( $image_id ) ) {
+                return $image_id;
+            }
+        }
+
+        return 0;
+    }
+
     private function get_missing_unit_listings() {
         $ids     = get_posts( [ 'post_type' => 'at_biz_dir', 'post_status' => 'any', 'posts_per_page' => -1, 'fields' => 'ids', 'meta_query' => [ 'relation' => 'AND', [ 'key' => self::META_IN_CENTRE, 'value' => 'yes' ], [ 'relation' => 'OR', [ 'key' => self::META_SHOP_NUMBER, 'compare' => 'NOT EXISTS' ], [ 'key' => self::META_SHOP_NUMBER, 'value' => '' ] ] ] ] );
         $results = [];
@@ -845,7 +1333,7 @@ final class Directorist_Shopping_Centres {
     }
 
     public function maybe_run_remediation_migration() {
-        if ( ! current_user_can( 'manage_options' ) || self::VERSION === get_option( 'dsc_remediation_version' ) ) {
+        if ( ! current_user_can( 'manage_options' ) || self::REMEDIATION_VERSION === get_option( 'dsc_remediation_version' ) ) {
             return;
         }
         $this->create_rollback_snapshot();
@@ -857,7 +1345,7 @@ final class Directorist_Shopping_Centres {
         $options['disable_contact_owner'] = true;
         $options['enable_claim_listing']  = false;
         update_option( 'atbdp_option', $options );
-        update_option( 'dsc_remediation_version', self::VERSION );
+        update_option( 'dsc_remediation_version', self::REMEDIATION_VERSION );
         flush_rewrite_rules( false );
         if ( class_exists( '\\Elementor\\Plugin' ) && isset( \Elementor\Plugin::$instance->files_manager ) ) {
             \Elementor\Plugin::$instance->files_manager->clear_cache();

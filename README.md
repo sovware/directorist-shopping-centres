@@ -1,6 +1,6 @@
 # Directorist Shopping Centres
 
-Version 1.1 adds the responsive Homepage centre carousel, the paginated Shopping Centres archive, structured centre addresses, accessible Directorist search suggestions, exact-name search routing, grouped store/deal pages, and the backend Store / Location workflow.
+Version 1.3 adds configurable archive display controls alongside the repeat-safe legacy Shopping Centre tag importer. Administrators can match the complete staging archive or show active-deal centres only without removing centre records or changing the separately controlled homepage widget.
 
 See [docs/administrator-guide.md](docs/administrator-guide.md) for the day-to-day content workflow and media rules.
 
@@ -17,6 +17,7 @@ This extension lets an admin create shopping centres, upload a centre image, ass
 - Sorts participating store deals alphabetically by store name.
 - Adds an Elementor widget named **Shopping Centres**.
 - Keeps shortcode support for non-Elementor pages.
+- Adds a previewable legacy-centre import/sync tool under **Listings > Shopping Centre Tools**.
 
 ## Screenshot Overview
 
@@ -45,6 +46,14 @@ Frontend Shopping Centre page:
 ![Frontend centre page](docs/screenshots/06-frontend-centre-page.png)
 
 ## Admin Usage
+
+### Import Legacy Shopping Centres
+
+Go to:
+
+`Listings > Shopping Centre Tools`
+
+Under **Legacy Shopping Centre import**, review the eligible, existing, and new-centre counts, then click **Import / Sync Legacy Centres**. The importer excludes state headings and generic venue types, reuses matching managed centres, and does not delete the old tags. It is safe to run again after new legacy centres are added.
 
 ### 1. Check The Plugin Is Active
 
@@ -106,7 +115,21 @@ Edit the homepage with Elementor.
    - Centre name typography and color
    - Deal count typography and color
 
-### 5. Add Shopping Centre Tiles With Shortcode
+### 5. Configure The Complete Shopping Centres Archive
+
+Go to **Listings → Shopping Centre Tools → Archive display settings**.
+
+You can independently control the `/shopping-centres/` archive:
+
+- Show or hide publicly visible centres that have no current deals.
+- Show 6, 12, 24, or all centres per page.
+- Enable or disable archive search.
+- Sort by centre name, current deal count, or recently added.
+- Show or hide the current-deal count on archive cards.
+
+The default shows empty centres, 12 per page, matching the complete staging archive. Per-centre **Public visibility** always wins: a centre explicitly marked hidden remains hidden everywhere. Homepage display remains controlled separately by its Elementor widget.
+
+### 6. Add Shopping Centre Tiles With Shortcode
 
 Use this shortcode on a normal WordPress page:
 
@@ -129,7 +152,7 @@ Option meanings:
 | `hide_empty` | `1` | Hide centres with no deals |
 | `number` | `0` | Limit count; `0` means show all |
 
-### 6. Show Deals For One Centre With Shortcode
+### 7. Show Deals For One Centre With Shortcode
 
 Use:
 
