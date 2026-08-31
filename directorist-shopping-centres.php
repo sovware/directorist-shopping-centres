@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Directorist Shopping Centres
  * Description: Shopping centre discovery, grouped deals, search, and an admin-friendly listing workflow for Directorist.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: InStoreOnly
  * Text Domain: directorist-shopping-centres
  * Requires Plugins: directorist
@@ -11,7 +11,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Directorist_Shopping_Centres {
-    const VERSION                 = '1.3.0';
+    const VERSION                 = '1.3.1';
     const REMEDIATION_VERSION     = '1.2.2';
     const TAXONOMY                = 'at_biz_dir-shopping-centre';
     const LEGACY_TAXONOMY         = 'at_biz_dir-tags';
@@ -998,9 +998,6 @@ final class Directorist_Shopping_Centres {
         if ( 'disable_contact_owner' === $name ) {
             return true;
         }
-        if ( 'enable_claim_listing' === $name ) {
-            return false;
-        }
         return $value;
     }
 
@@ -1343,7 +1340,7 @@ final class Directorist_Shopping_Centres {
         $this->sync_all_existing_listings();
         $options = (array) get_option( 'atbdp_option', [] );
         $options['disable_contact_owner'] = true;
-        $options['enable_claim_listing']  = false;
+        $options['enable_claim_listing']  = true;
         update_option( 'atbdp_option', $options );
         update_option( 'dsc_remediation_version', self::REMEDIATION_VERSION );
         flush_rewrite_rules( false );
@@ -1534,7 +1531,7 @@ final class Directorist_Shopping_Centres {
                 update_term_meta( $directory_id, 'single_listings_contents', $single );
                 unset( $single_value );
             }
-            update_term_meta( $directory_id, 'enable_claim_listing', false );
+            update_term_meta( $directory_id, 'enable_claim_listing', true );
         }
     }
 
