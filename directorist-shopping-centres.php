@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Directorist Shopping Centres
  * Description: Shopping centre discovery, grouped deals, search, and an admin-friendly listing workflow for Directorist.
- * Version: 1.3.1
+ * Version: 1.3.2
  * Author: InStoreOnly
  * Text Domain: directorist-shopping-centres
  * Requires Plugins: directorist
@@ -11,7 +11,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class Directorist_Shopping_Centres {
-    const VERSION                 = '1.3.1';
+    const VERSION                 = '1.3.2';
     const REMEDIATION_VERSION     = '1.2.2';
     const TAXONOMY                = 'at_biz_dir-shopping-centre';
     const LEGACY_TAXONOMY         = 'at_biz_dir-tags';

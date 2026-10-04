@@ -387,7 +387,8 @@
 .dsc-deal-row__image {
     overflow: hidden;
     width: 88px;
-    aspect-ratio: 1;
+    /* Store artwork uses the same 1080 x 1920 portrait format as listing cards. */
+    aspect-ratio: 9 / 16;
     border-radius: 8px;
     background: #edf1f5;
 }
@@ -395,7 +396,7 @@
 .dsc-deal-row__image img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
 }
 
 .dsc-deal-row__content,
@@ -531,8 +532,6 @@
 }
 
 /* Public-page cleanup: filters disable behavior; selectors protect legacy templates. */
-.single-at_biz_dir .directorist-claim-listing-wrapper,
-.single-at_biz_dir .directorist-claim-listing-modal,
 .single-at_biz_dir .directorist-single-listing-contact-owner,
 .single-at_biz_dir .directorist-contact-owner-form {
     display: none !important;
